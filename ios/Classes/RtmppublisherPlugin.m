@@ -200,6 +200,7 @@ FlutterStreamHandler>
 @property(assign, nonatomic) BOOL audioIsDisconnected;
 @property(assign, nonatomic) BOOL isAudioSetup;
 @property(assign, nonatomic) BOOL isStreamingImages;
+@property(assign, nonatomic) BOOL audioMuted;
 @property(assign, nonatomic) ResolutionPreset resolutionPreset;
 @property(assign, nonatomic) ResolutionPreset streamingPreset;
 @property(assign, nonatomic) CMTime lastVideoSampleTime;
@@ -218,6 +219,9 @@ FlutterStreamHandler>
 - (void)stop;
 - (void)startVideoRecordingAtPath:(NSString *)path result:(FlutterResult)result;
 - (void)startVideoStreamingAtUrl:(NSString *)url bitrate:(NSNumber *)bitrate result:(FlutterResult)result;
+- (void)switchCamera:(FlutterResult)result;
+- (void)enableAudio:(FlutterResult)result;
+- (void)disableAudio:(FlutterResult)result;
 - (void)startVideoRecordingAndStreamingAtUrl:(NSString *)url bitrate:(NSNumber *)bitrate filePath:(NSString *) result:(FlutterResult)result;
 - (void)startImageStreamWithMessenger:(NSObject<FlutterBinaryMessenger> *)messenger;
 - (void)stopImageStream;
@@ -285,6 +289,71 @@ FourCharCode const videoFormat = kCVPixelFormatType_32BGRA;
     
     [self setCaptureSessionPreset:_resolutionPreset];
     return self;
+}
+
+// Swaps the AVCaptureDeviceInput on the already-running session instead of
+// tearing down and recreating the whole capture session/encoder/RTMP
+// connection — addInputWithNoConnections/addConnection was already in use
+// here, which is exactly the pattern meant for a live reconfiguration.
+- (void)switchCamera:(FlutterResult)result {
+    AVCaptureDevicePosition newPosition = (_captureDevice.position == AVCaptureDevicePositionFront)
+        ? AVCaptureDevicePositionBack
+        : AVCaptureDevicePositionFront;
+    AVCaptureDevice *newDevice =
+        [AVCaptureDevice defaultDeviceWithDeviceType:AVCaptureDeviceTypeBuiltInWideAngleCamera
+                                            mediaType:AVMediaTypeVideo
+                                             position:newPosition];
+    if (!newDevice) {
+        result([FlutterError errorWithCode:@"switchCameraFailed"
+                                    message:@"No camera available for the requested position"
+                                    details:nil]);
+        return;
+    }
+
+    NSError *error = nil;
+    AVCaptureDeviceInput *newInput = [AVCaptureDeviceInput deviceInputWithDevice:newDevice error:&error];
+    if (error || !newInput) {
+        result([FlutterError errorWithCode:@"switchCameraFailed"
+                                    message:error.localizedDescription
+                                    details:nil]);
+        return;
+    }
+
+    [_captureSession beginConfiguration];
+
+    for (AVCaptureConnection *connection in _captureSession.connections) {
+        if (connection.output == _captureVideoOutput) {
+            [_captureSession removeConnection:connection];
+        }
+    }
+    [_captureSession removeInput:_captureVideoInput];
+
+    AVCaptureConnection *newConnection =
+        [AVCaptureConnection connectionWithInputPorts:newInput.ports output:_captureVideoOutput];
+    if (newPosition == AVCaptureDevicePositionFront) {
+        newConnection.videoMirrored = YES;
+    }
+    newConnection.videoOrientation = AVCaptureVideoOrientationPortrait;
+
+    [_captureSession addInputWithNoConnections:newInput];
+    [_captureSession addConnection:newConnection];
+
+    [_captureSession commitConfiguration];
+
+    _captureDevice = newDevice;
+    _captureVideoInput = newInput;
+
+    result(nil);
+}
+
+- (void)enableAudio:(FlutterResult)result {
+    _audioMuted = NO;
+    result(nil);
+}
+
+- (void)disableAudio:(FlutterResult)result {
+    _audioMuted = YES;
+    result(nil);
 }
 
 - (void)start {
@@ -503,7 +572,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
         CFRetain(sampleBuffer);
         if (output == _captureVideoOutput) {
             [_rtmpStream addVideoDataWithBuffer:sampleBuffer ];
-        } else {
+        } else if (!_audioMuted) {
             [_rtmpStream addAudioDataWithBuffer:sampleBuffer ];
         }
         CFRelease(sampleBuffer);
@@ -1143,6 +1212,12 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
             [_camera startVideoRecordingAtPath:call.arguments[@"filePath"] result:result];
         } else if ([@"startVideoStreaming" isEqualToString:call.method]) {
             [_camera startVideoStreamingAtUrl:call.arguments[@"url"] bitrate:call.arguments[@"bitrate"] result:result];
+        } else if ([@"switchCamera" isEqualToString:call.method]) {
+            [_camera switchCamera:result];
+        } else if ([@"enableAudio" isEqualToString:call.method]) {
+            [_camera enableAudio:result];
+        } else if ([@"disableAudio" isEqualToString:call.method]) {
+            [_camera disableAudio:result];
         } else if ([@"startVideoRecordingAndStreaming" isEqualToString:call.method]) {
             [_camera startVideoRecordingAndStreamingAtUrl:call.arguments[@"url"] bitrate:call.arguments[@"bitrate"] filePath:call.arguments[@"filePath"] result:result];
         } else if ([@"stopStreaming" isEqualToString:call.method]) {
