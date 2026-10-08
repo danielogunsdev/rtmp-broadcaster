@@ -572,7 +572,17 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
         CFRetain(sampleBuffer);
         if (output == _captureVideoOutput) {
             [_rtmpStream addVideoDataWithBuffer:sampleBuffer ];
-        } else if (!_audioMuted) {
+        } else {
+            // Keep the audio track continuous while muted — silence the PCM
+            // data in place rather than dropping the buffer, since HaishinKit/
+            // Cloudflare's live ingest expects an unbroken audio stream and
+            // stalls playback entirely (not just audio) if it disappears.
+            if (_audioMuted) {
+                CMBlockBufferRef blockBuffer = CMSampleBufferGetDataBuffer(sampleBuffer);
+                if (blockBuffer) {
+                    CMBlockBufferFillDataBytes(0, blockBuffer, 0, CMBlockBufferGetDataLength(blockBuffer));
+                }
+            }
             [_rtmpStream addAudioDataWithBuffer:sampleBuffer ];
         }
         CFRelease(sampleBuffer);
