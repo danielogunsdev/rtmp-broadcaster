@@ -8,9 +8,6 @@ import android.hardware.camera2.CameraAccessException
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraManager
 import android.hardware.camera2.CameraMetadata
-import android.media.AudioFormat
-import android.media.AudioRecord
-import android.media.MediaRecorder
 import android.util.Log
 import android.view.SurfaceHolder
 import android.view.View
@@ -173,7 +170,6 @@ class CameraNativeView(
                     )
                 ) {
                     // ready to start streaming
-                    if (!rtmpCamera.isRecording) forceMicAudioSource()
                     rtmpCamera.startStream(url)
                 } else {
                     result.error("videoStreamingFailed", "Error preparing stream, This device cant do it", null)
@@ -235,54 +231,6 @@ class CameraNativeView(
     fun disableAudio(result: MethodChannel.Result) {
         rtmpCamera.disableAudio()
         result.success(null)
-    }
-
-    // prepareAudio() always builds its AudioRecord with AudioSource.DEFAULT,
-    // hardcoded three calls deep in the bundled rtplibrary/encoder AARs —
-    // there's no public API to choose a different source. On some devices
-    // (Samsung/MediaTek chipsets observed) DEFAULT silently captures nothing
-    // even though every call reports success, while AudioSource.MIC works
-    // fine. Swap the AudioRecord in place via reflection, after prepareAudio()
-    // creates it but before startStream() starts reading from it.
-    private fun forceMicAudioSource() {
-        try {
-            val micManagerField = findField(rtmpCamera.javaClass, "microphoneManager") ?: return
-            micManagerField.isAccessible = true
-            val micManager = micManagerField.get(rtmpCamera) ?: return
-
-            val audioRecordField = findField(micManager.javaClass, "audioRecord") ?: return
-            audioRecordField.isAccessible = true
-            val oldRecord = audioRecordField.get(micManager) as? AudioRecord ?: return
-
-            val sampleRate = 32000
-            val channelConfig = AudioFormat.CHANNEL_IN_STEREO
-            val audioFormat = AudioFormat.ENCODING_PCM_16BIT
-            val bufferSize = AudioRecord.getMinBufferSize(sampleRate, channelConfig, audioFormat)
-
-            val newRecord = AudioRecord(
-                MediaRecorder.AudioSource.MIC,
-                sampleRate,
-                channelConfig,
-                audioFormat,
-                bufferSize
-            )
-            oldRecord.release()
-            audioRecordField.set(micManager, newRecord)
-        } catch (e: Exception) {
-            Log.w("CameraNativeView", "Could not override mic audio source", e)
-        }
-    }
-
-    private fun findField(startClass: Class<*>, name: String): java.lang.reflect.Field? {
-        var clazz: Class<*>? = startClass
-        while (clazz != null) {
-            try {
-                return clazz.getDeclaredField(name)
-            } catch (_: NoSuchFieldException) {
-                clazz = clazz.superclass
-            }
-        }
-        return null
     }
 
     fun pauseVideoStreaming(result: Any) {
